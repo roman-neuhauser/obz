@@ -1,0 +1,102 @@
+.. vim: ft=rst sts=2 sw=2 tw=75
+
+###########################################################################
+                                    obz
+###########################################################################
+===========================================================================
+                Lightweight CLI client for OpenBuildService
+===========================================================================
+
+.. This file is marked up using reStructuredText.
+   Lines beginning with ".." are reST directives.
+   "foo_" or "`foo bar`_" is a link, defined at ".. _foo" or
+   ".. _foo bar".
+   "::" introduces a literal block (usually some form of code).
+   "`foo`" is some kind of identifier.
+   Suspicious backslashes in the text ("`std::string`\s") are required
+   for reST to recognize the preceding character as syntax, or the
+   following character as *not* syntax (\*.spec).
+
+.. default-role:: strong
+
+Introduction
+============
+
+`OpenBuildService`_ (OBS) is a "generic system to build and distribute
+packages from sources in an automatic, consistent and reproducible way".
+It's a build bot *and* a (very basic) versioning system.  OBS has a web
+interface which is ok-ish for mostly passive use (viewing) and some light
+project/package maintenance, and an HTTP/XML API for standalone clients.
+
+The most widely used client for OBS, `osc`_ is a CLI program with some
+vaguely `Subversion`_-like features and behaviors which lets you "edit
+sources, metadata, trigger builds and gather results".
+
+Motivation
+==========
+
+`osc` is *mature* software, in the sense that it has a large userbase
+(close to all of the OBS client market) and it's a critical part of
+the openSUSE and SUSE infrastructure.  Naturally, this leads to strong
+inertia.  It's hard to fix old mistakes without disrupting somebody's
+precious tools or workflows.
+
+Some of the possible improvements over `osc`:
+
+* do not crap out on interrupted downloads
+* segment large downloads
+* do things in parallel
+
+Speed comparison with `osc`
+===========================
+
+The following table lists `osc status` vs `obz status` times of three
+packages of different sizes, using a proof-of-concept implementation
+for `obz status`.
+
+::
+
+  28K  zsh-lovers/v0.9.0.tar.gz
+
+  osc st zsh-lovers    0.20s user 0.02s system  98% cpu 0.223 total
+  osc st zsh-lovers    0.21s user 0.01s system  98% cpu 0.223 total
+  osc st zsh-lovers    0.22s user 0.00s system  98% cpu 0.223 total
+
+  obz st zsh-lovers    0.00s user 0.01s system  71% cpu 0.019 total
+  obz st zsh-lovers    0.01s user 0.00s system  71% cpu 0.019 total
+  obz st zsh-lovers    0.01s user 0.00s system  71% cpu 0.019 total
+
+  137M  xulrunner/xulrunner-29.0.source.tar.bz2
+
+  osc st xulrunner     0.42s user 0.04s system  99% cpu 0.463 total
+  osc st xulrunner     0.44s user 0.03s system  99% cpu 0.465 total
+  osc st xulrunner     0.44s user 0.03s system  99% cpu 0.477 total
+
+  obz st xulrunner     0.05s user 0.05s system  85% cpu 0.113 total
+  obz st xulrunner     0.03s user 0.07s system  86% cpu 0.112 total
+  obz st xulrunner     0.04s user 0.06s system  88% cpu 0.113 total
+
+  993M  xonotic-data/xonotic-0.7.0.zip
+
+  osc st xonotic-data  1.82s user 0.14s system  99% cpu 1.962 total
+  osc st xonotic-data  1.81s user 0.16s system 100% cpu 1.973 total
+  osc st xonotic-data  1.80s user 0.17s system 100% cpu 1.973 total
+
+  obz st xonotic-data  0.13s user 0.29s system  98% cpu 0.422 total
+  obz st xonotic-data  0.14s user 0.27s system  98% cpu 0.415 total
+  obz st xonotic-data  0.14s user 0.27s system  98% cpu 0.414 total
+
+Sadly, `obz` loses horribly in checking the status of a large project,
+where `osc status` in a directory with ~3200 packages takes about 6 minutes
+to finish vs. 15 minutes (!!!) for `obz`.
+
+The above numbers suggest that `obz` should take 22 minutes to check
+the status of 3200 packages the size of xonotic-data (~1GB), 6 minutes
+for 3200 packages in the 100-150MB range, and a minute if everything was
+the size of zsh-lovers.  That's quite an optimization opportunity, since
+most source tarballs are indeed less than 1MB.
+
+.. _`OpenBuildService`: http://openbuildservice.org/
+.. _`Subversion`: http://subversion.apache.org/
+.. _`osc`: http://en.opensuse.org/openSUSE:OSC
+.. _`parallel`: https://www.gnu.org/software/parallel/
