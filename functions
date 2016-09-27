@@ -1,0 +1,361 @@
+# vim: ft=zsh sw=2 sts=2 et fdm=marker cms=\ #\ %s
+
+(( $+TOOLS )) || declare TOOLS=${0:a:h}
+
+zmodload zsh/datetime
+#zmodload -F zsh/files b:zf_cmp
+zmodload zsh/mapfile
+zmodload zsh/pcre
+zmodload zsh/stat
+
+function setup # {{{
+{
+  print -f 'export PATH=$PATH:%s\n' -- ${OBZ:h}
+} # }}}
+
+function run # {{{
+{
+  echo "$@" >&2
+  "$@"
+} # }}}
+function run-t # {{{
+{
+  echo "$@" >&2
+  time "$@"
+} # }}}
+
+function in-dir # {{{
+{
+  local cmd=
+
+  while getopts c: optname; do
+    case $optname in
+    c) cmd="$OPTARG" ;;
+    esac
+  done; shift $((OPTIND - 1))
+
+  if [[ -z $cmd ]]; then
+    cmd=${1:?}
+    shift
+  fi
+
+  local -r owd=$PWD
+  cd $dir
+  { eval "$cmd $*" } always { cd $owd }
+} # }}}
+
+function load-config # wanted cfgfile {{{
+# populate $OBZ_CFG w/ $wanted section data from $cfgfile
+#
+# config file is a sequence of statements;
+# a statement spans an /^\S/ line possibly followed
+# by a run of /^\s+/ lines;
+# empty lines are ignored, even within statements;
+# comments start with '#';
+# usual shell lexing rules apply
+{
+  local wanted=$1 cfgfile=$2
+  local default= stmt=
+
+  # iterate lines of $cfgfile, ignoring empty lines;
+  # a statement is complete as soon we have a new one,
+  # the last statement of the $cfgfile is handled by
+  # the synthetic ENDOFOBZCONFIG line
+  # FIXME: splitting the string into an array on newlines
+  # not-followed-by horizontal ws would let me do w/o
+  # the statefulness or ENDOFOBZCONFIG
+  local line
+  for line in "${(@f):-$(cat $cfgfile)}" ENDOFOBZCONFIG; do
+    case $line in
+    '') # ignored
+    ;;
+    [[:space:]]*)
+      stmt+=$line
+    ;;
+    *)
+      if [[ -n $stmt ]]; then
+        local -a w; w=("${(Z:C:)stmt}")
+        case $w[1] in
+        default) default=$w[2] ;;
+        section) 
+          OBZ_APIS+=($w[2])
+          local name=OBZ_API_$w[2]
+          declare -Ag $name
+          : "${(AAP)name::=${(@)w}}"
+        ;;
+        esac
+      fi
+      stmt=$line
+    ;;
+    esac
+  done
+
+  case $wanted in
+  default) OBZ_API=$default ;;
+  *) OBZ_API=$wanted ;;
+  esac
+
+  if [[ ${OBZ_APIS[(i)$OBZ_API]} -gt $#OBZ_APIS ]]; then
+    print -f 'requested configuration (%s) not found in %s\n' \
+      -- $OBZ_API $cfgfile
+    return 1
+  fi >&2
+
+  # populate a config file for curl(1) to avoid
+  # --user login:password on the commandline
+  # FIXME: https://sourceforge.net/p/curl/bugs/1375/
+  local -r curlcfg=$cfgfile:h/curl.$OBZ_API
+  local -r name=OBZ_API_$OBZ_API
+  declare -Ag OBZ_CFG; OBZ_CFG=(${(Pkv)name})
+
+  OBZ_CFG[curlconfig]=$curlcfg
+
+  if [[ ! -e $curlcfg || $curlcfg -ot $cfgfile ]]; then
+    print -f '%s\n' -- \
+      "--user $OBZ_CFG[user]:$OBZ_CFG[pass]" \
+    >$OBZ_CFG[curlconfig]
+  fi
+} # }}}
+
+function api-call # arg... urlpath {{{
+{
+  local urlpath=$@[-1]
+  run-t curl -SsfgL -K ${OBZ_CFG[curlconfig]} \
+    "$@[1,-2]" ${OBZ_CFG[url]%/##}/$urlpath
+} # }}}
+
+function download # into from {{{
+{
+  local -r lpath=$1 url=$2
+  if [[ -e $lpath ]]; then
+    return
+  fi
+  {
+    api-call -C - -o $lpath $url
+  } always {
+    local -i rv=$?
+    if (( rv != 33 )); then
+      return $rv
+    fi
+    api-call -o $lpath $url
+  }
+} # }}}
+
+function adopt-package # osc-pkg {{{
+# populate $pkg/.obz from $pkg/.osc
+# leaves $pkg/.osc untouched
+# resets mtime of checked-out files based on their metadata
+{
+  (( $# )) || set -- .
+  local pkg=$1
+  assert-osc-pkg $pkg
+  create-dotobz $pkg
+  obs-parse-directory $pkg $pkg/.osc/_files create-entry
+  local s=
+  for s in $pkg/.obz/entries/*(DN:t); do
+    cp -a $pkg/.osc/$s $pkg/.obz/canned/$s
+  done
+} # }}}
+
+function assert-osc-pkg # dir {{{
+{
+  local osc=$1/.osc
+  [[ -d $osc ]]
+  [[ -f $osc/_package ]]
+  [[ -f $osc/_project ]]
+  [[ -f $osc/_files   ]]
+} # }}}
+
+function create-dotobz # under {{{
+{
+  local dst=$1 obz=$1/.obz
+  [[ -d $obz ]] || mkdir $obz
+  mkdir -p $obz/{canned,entries,tmp}
+} # }}}
+
+function obs-parse-directory # pkgdir xml entry-callback {{{
+(
+  local pkgdir=$1 xml=$2 do_entry=$3
+
+  # read $xml into an array of lines
+  local -a lines; lines=("${(f@)mapfile[$xml]}")
+  local line dir
+  local -a entries
+
+  for line in "${(@)lines}"; do
+    if [[ $line -pcre-match '\s*<directory\s+(.+)\s*>\s*' ]]; then
+      dir=$match[1]
+    elif [[ $line -pcre-match '\s*<entry\s+(.+)\s*/>\s*' ]]; then
+      entries+=($match[1])
+    fi
+  done
+
+  local -A einfo
+  for e in $entries; do
+    xmlattrs-to-array einfo $e
+    $do_entry $pkgdir einfo
+  done
+) # }}}
+
+function create-entry # pkg eiptr {{{
+# populates a file in .obz/entries/
+# from data in the variable named by $eiptr
+{
+  local pkg=$1 ptr=$2
+  local -A ey; ey=("${(@Pkv)ptr}")
+  print-entry "$@" > $pkg/.obz/entries/$ey[name]
+} # }}}
+
+function print-entry # pkg eiptr {{{
+{
+  local pkg=$1 ptr=$2
+  local -A ey; ey=("${(@Pkv)ptr}")
+  print -f '%s %q\n' -- \
+    name      $ey[name] \
+    md5       $ey[md5] \
+    mtime     $ey[mtime] \
+    size      $ey[size] \
+} # }}}
+
+function xmlattrs-to-array # result sattrs {{{
+# convert $sattrs into $result
+{
+  local -a tmp
+  # split the string into attributes (xml attributes
+  # look very much like shell parameter assignments)
+  tmp=("${(z)2}")
+  # replace first "=" in each item with a space
+  tmp=("${(@)tmp/=/ }")
+  # split again (on the above-created spaces)
+  tmp=("${(z)tmp}")
+  # dequote and keep empty items
+  tmp=("${(@Q)tmp}")
+  # use tmp as key/value pairs for the destination
+  : ${(AAP)1::="${(@kv)tmp}"}
+} # }}}
+
+function checkout-package # [-c|-o dir] prj/pkg {{{
+{
+  local dst= prjdir=true
+
+  local optname OPTARG OPTIND
+  while getopts co:r: optname; do
+  case $optname in
+  c) prjdir=false ;;
+  o) prjdir=true dst=${OPTARG:?} ;;
+  esac
+  done; shift $((OPTIND - 1))
+
+  local prj=${1%/*} pkg=${1##*/}
+  if $prjdir; then
+    : ${dst:=$prj/$pkg}
+  else
+    dst=$pkg
+  fi
+
+  mkdir -p $dst
+  create-dotobz $dst
+
+  local tmp=$dst/.obz/tmp/directory.xml
+  {
+    download $tmp /source/$prj/$pkg
+    obs-parse-directory $dst $tmp create-entry
+    for e in $dst/.obz/entries/*(DN); do
+      fetch-file $dst $prj/$pkg ${e:t}
+    done
+  } always {
+    rm -f $tmp
+  }
+} # }}}
+
+function fetch-file # pkgdir prjpkg file {{{
+{
+  local dst=$1 prjpkg=$2 file=$3
+
+  local can=$dst/.obz/canned/$file
+  local ent=$dst/.obz/entries/$file
+  local tmp=$dst/.obz/tmp/$file
+  {
+    download $tmp /source/$prjpkg/$file
+    local -A mdata; mdata=("${(@fz)mapfile[$ent]}")
+    print -f '%s %s\n' -- $mdata[md5] $tmp \
+    | run-t md5sum --check --quiet
+    mv $tmp $can
+    cp -a $can $dst/$file
+    print -f 'A %s\n' -- $dst/$file
+  } always {
+    rm -f $tmp
+  }
+} # }}}
+
+function print-status # arg... {{{
+{
+  local -a args; args=("$@")
+  (( $#args )) || args=($(ls-pkg))
+  for a in $args; do
+    status-path $a
+  done
+} # }}}
+
+function ls-pkg # [pkg] {{{
+{
+  local pfx=${1:+$1/}
+  local -a list
+  # stuff that *should* be there
+  list+=($~pfx.obz/entries/*(.DN:t))
+  # stuff that *is* there
+  list+=($~pfx*~$~pfx(.buildlog|.osc|.obz|*.sw?)(.DN:t))
+
+  print -l -- "$~pfx${(@u)^list}"
+} # }}}
+
+function status-path # pkg|file {{{
+{
+  local arg=$1
+  if [[ -d $arg && -d $arg/.obz ]]; then
+    status-pkg $arg
+  else
+    status-file $arg
+  fi
+} # }}}
+
+function status-pkg # pkg {{{
+{
+  local pkg=$1
+  local p=
+  for p in $(ls-pkg $pkg); do
+    status-file $p
+  done
+} # }}}
+
+function status-file # file {{{
+{
+  local file=$1 name=$1:t pkg=$1:h
+  local meta=$pkg/.obz/entries/$name
+  local stchar='M'
+  local -A mdata stat
+  zstat -H stat $file
+  repeat 1 do
+    [[ -f $meta ]] || {
+      stchar='?'
+      break
+    }
+    [[ -f $file ]] || {
+      stchar='!'
+      break
+    }
+    mdata=("${(@fz)mapfile[$meta]}")
+    zstat -H stat $file
+    [[ $mdata[size] -eq $stat[size] ]] || break
+    run zcmp -s $file $pkg/.obz/canned/$name || break
+    return
+  done
+
+  print -f '%s %s\n' $stchar $file
+} # }}}
+
+function zcmp # {{{
+{
+  cmp "$@"
+} # }}}
+

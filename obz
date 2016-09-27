@@ -1,0 +1,43 @@
+#!/usr/bin/env zsh
+# vim: ft=zsh sw=2 sts=2 et fdm=marker cms=\ #\ %s
+
+(( $+OBZ_PROFILING )) && zmodload zsh/zprof
+
+set -o errreturn
+set -o extendedglob
+set -o nounset
+
+declare -gxr OBZ=${0:a}
+declare -g OBZ_API
+declare -ag OBZ_APIS
+
+source ${OBZ:h}/functions
+
+function obz-main # {{{
+{
+  local apiname=default
+
+  local optname= OPTARG= OPTIND=
+  while getopts A: optname; do
+  case $optname in
+  A) apiname=$OPTARG ;;
+  esac
+  done; shift $((OPTIND - 1))
+
+  load-config $apiname ${XDG_CONFIG_HOME:-$HOME/.config}/obz/config
+
+  case $1 in
+  st | status) cmd=print-status ;;
+  co | checkout) cmd=checkout-package ;;
+  adopt) cmd=adopt-package ;;
+  setup) cmd=setup ;;
+  esac; shift
+
+  $cmd "$@"
+} # }}}
+
+if [[ $#zsh_eval_context -eq 1 ]]; then
+  obz-main "$@"
+fi
+
+(( $+OBZ_PROFILING )) && zprof
